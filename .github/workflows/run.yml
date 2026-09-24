@@ -1,0 +1,39 @@
+name: Rockyou Roku Playlist
+
+on:
+  schedule:
+    - cron: '23 */3 * * *'      # every 3h, off-minute to dodge GitHub's top-of-hour drift
+  workflow_dispatch:
+
+concurrency:
+  group: rockyou
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Generate playlist + EPG
+        run: python -u rockyou.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add roku.m3u roku_epg.xml rockyou_state.json.gz
+          git commit -m "Update Roku playlist" || echo "No changes to commit"
+          git push
