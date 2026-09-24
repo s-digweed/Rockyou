@@ -26,6 +26,8 @@ import json
 import time
 import collections
 import requests
+import xml.etree.ElementTree as ET
+from io import BytesIO
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -35,12 +37,18 @@ from datetime import datetime, timezone
 SOURCE_URL = "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/Roku/.channels.json.gz"
 STREAM_TMPL = "https://jmp2.uk/rok-{id}.m3u8"
 
+# Matt's rich Roku EPG (title, description, episode-num, per-programme art).
+# We enrich our guide from this and strip the redundant sub-title (Roku always
+# repeats the title as the episode title). Falls back to a titles-only guide
+# built from the channels JSON if this fetch fails.
+MATT_EPG_URL = "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/Roku/all.xml.gz"
+
 # Point this at YOUR repo's raw path so TiviMate pulls the EPG we generate.
-EPG_RAW_URL = "https://raw.githubusercontent.com/s-digweed/Rockyou/main/roku_epg.xml"
+EPG_RAW_URL = "https://raw.githubusercontent.com/s-digweed/Rockyou/main/roku_epg.xml.gz"
 
 STATE_FILE = "rockyou_state.json.gz"
 M3U_FILE   = "roku.m3u"
-EPG_FILE   = "roku_epg.xml"
+EPG_FILE   = "roku_epg.xml.gz"
 
 # Keep a channel that has dropped out of the feed this long after it was last
 # seen, then let it go as genuinely dead. 50 days rides out even Roku's
@@ -287,10 +295,62 @@ def xt(ts):
     return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y%m%d%H%M%S +0000")
 
 
-def build_epg(merged):
+def _epg_ts(s):
+    try:
+        return int(datetime.strptime(s.split()[0], "%Y%m%d%H%M%S")
+                   .replace(tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return None
+
+
+def build_epg_rich(merged):
+    """Enrich the guide from Matt's rich Roku EPG (all.xml.gz): keep title,
+    description, episode-num and programme art, but DROP <sub-title> whenever it
+    just repeats <title> (Roku always does this). Filtered to our channels and
+    pruned to future programmes. Returns the XMLTV string, or None on failure."""
+    try:
+        r = requests.get(MATT_EPG_URL, headers={"User-Agent": UA}, timeout=REQ_TIMEOUT)
+        r.raise_for_status()
+        root = ET.parse(BytesIO(gzip.decompress(r.content))).getroot()
+    except Exception as e:
+        print(f"Rich EPG fetch/parse failed ({e}); falling back to titles-only guide")
+        return None
+
+    keep = set(merged)
     now = now_ts()
     out = ['<?xml version="1.0" encoding="UTF-8"?>', "<tv>"]
-    # channel elements
+    kept_ch = kept_prog = deduped = 0
+
+    for ch in root.findall("channel"):
+        if ch.get("id") in keep:
+            out.append(ET.tostring(ch, encoding="unicode").strip())
+            kept_ch += 1
+
+    for p in root.findall("programme"):
+        if p.get("channel") not in keep:
+            continue
+        stop = _epg_ts(p.get("stop", ""))
+        if stop is not None and stop <= now:
+            continue                                  # drop finished programmes
+        title = (p.findtext("title") or "").strip()
+        st = p.find("sub-title")
+        if st is not None and (st.text or "").strip() == title:
+            p.remove(st)                              # <-- the fix: drop the repeat
+            deduped += 1
+        out.append(ET.tostring(p, encoding="unicode").strip())
+        kept_prog += 1
+
+    out.append("</tv>")
+    print(f"Rich EPG: {kept_ch} channels, {kept_prog} future programmes, "
+          f"{deduped} repeated sub-titles removed")
+    return "\n".join(out) + "\n"
+
+
+def build_epg_thin(merged):
+    """Fallback: titles-only guide built from the channels JSON `programs`
+    (used only if Matt's rich EPG can't be fetched)."""
+    now = now_ts()
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', "<tv>"]
     for cid, ch in merged.items():
         name = xml_escape(ch.get("name") or cid)
         logo = ch.get("logo") or ""
@@ -299,24 +359,25 @@ def build_epg(merged):
             el += f'<icon src="{xml_escape(logo)}" />'
         el += "</channel>"
         out.append(el)
-    # programmes — build stops from the next start; prune anything already ended
     for cid, ch in merged.items():
-        progs = ch.get("programs") or []
-        if not progs:
-            continue
-        progs = sorted(progs, key=lambda p: p[0])
+        progs = sorted(ch.get("programs") or [], key=lambda p: p[0])
         for i, p in enumerate(progs):
             start = int(p[0])
             title = p[1] if len(p) > 1 else (ch.get("name") or "")
             stop = int(progs[i + 1][0]) if i + 1 < len(progs) else start + LAST_PROG_SECONDS
             if stop <= now:
-                continue                      # drop finished programmes
+                continue
             out.append(
                 f'<programme start="{xt(start)}" stop="{xt(stop)}" channel="{cid}">'
                 f"<title>{xml_escape(title)}</title></programme>"
             )
     out.append("</tv>")
     return "\n".join(out) + "\n"
+
+
+def build_epg(merged):
+    """Prefer Matt's rich, de-duped EPG; fall back to titles-only."""
+    return build_epg_rich(merged) or build_epg_thin(merged)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +405,7 @@ def run(state_in=None, current_override=None):
 
     with open(M3U_FILE, "w", encoding="utf-8") as f:
         f.write(m3u)
-    with open(EPG_FILE, "w", encoding="utf-8") as f:
+    with gzip.open(EPG_FILE, "wt", encoding="utf-8") as f:   # gzipped EPG (TiviMate reads it natively)
         f.write(epg)
     save_state(merged)
 
