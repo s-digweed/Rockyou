@@ -133,6 +133,30 @@ GROUP_MAP = {
     "Talk": "TV & Entertainment",
 }
 
+# Per-channel group overrides, keyed by Roku channel id (stable across renames).
+# These win over GROUP_MAP, and are how we retire one-channel categories by
+# moving their sole member elsewhere.
+CHANNEL_OVERRIDES = {
+    "98cafb7f4b01848a967fda4bd2225bd7": "Sports",           # Unbeaten Sports (was 3X3 Basketball)
+    "3b1bd759566ea4c0fe9d7d6eb354d23d": "Sports",           # Triton Poker (was Card Games)
+    "ac0caef9123a35df3b884b139340a597": "Sports",           # CW Presents WWE NXT (was Pro Wrestling)
+    "9aff620ece2457a3a7572886ecae0495": "Music",            # Super Simple Songs (was Children-Music)
+    "ada4254a1dd65c138f62e7c45affb45c": "Home Improvement", # GARDEN with Monty Don (was House/Garden)
+    "7e9fe2b4c7ba5869af6d60adbf4b7c86": "Home Improvement", # This Old House (was Educational)
+    "c7825e03df4a5bf4bdc87d65b7e3cdbb": "Home Improvement", # This Old House Classic (was Educational)
+    "ccfcc3307fa908684a95bf9643b1b935": "Home Improvement", # This Old House Shorts (was Educational)
+    "4d62b7d4fc91fbc2b528eb10857d7ab8": "Documentary",      # Space Live (was Educational)
+    "0141916713c53d074650f14e2c9ff61e": "Crime",            # Britbox Mysteries (was Crime Drama)
+    "586bd3d19f6e4b7a5cf3458722984b82": "Entertainment",    # Court TV Legendary Trials (was Law)
+    "091bf303c7fd2bc2ec6683b1dbbadae1": "Entertainment",    # Storage Wars by A&E (was Auction)
+}
+
+# Final display-name rename applied to every group (catches both mapped genres
+# and groups carried in on seeded/retained channels).
+GROUP_RENAME = {
+    "TV & Entertainment": "Entertainment",
+}
+
 
 def now_ts():
     return int(datetime.now(timezone.utc).timestamp())
@@ -220,9 +244,13 @@ def merge(current, state):
 # Output builders
 # ---------------------------------------------------------------------------
 
-def group_of(ch):
-    raw = (ch.get("groups") or ["Other"])[0] if ch.get("groups") else "Other"
-    return GROUP_MAP.get(raw, raw)
+def group_of(ch, cid=None):
+    if cid and cid in CHANNEL_OVERRIDES:
+        g = CHANNEL_OVERRIDES[cid]
+    else:
+        raw = (ch.get("groups") or ["Other"])[0] if ch.get("groups") else "Other"
+        g = GROUP_MAP.get(raw, raw)
+    return GROUP_RENAME.get(g, g)
 
 
 def m3u_escape(s):
@@ -234,14 +262,14 @@ def build_m3u(merged):
     # group, then name — matches the ordering you already have
     ordered = sorted(
         merged.items(),
-        key=lambda kv: (group_of(kv[1]).lower(), (kv[1].get("name") or "").lower()),
+        key=lambda kv: (group_of(kv[1], kv[0]).lower(), (kv[1].get("name") or "").lower()),
     )
     for cid, ch in ordered:
         name = m3u_escape(ch.get("name") or cid)
         chno = ch.get("chno")
         chno = str(chno) if chno is not None and str(chno).isdigit() else ""
         logo = ch.get("logo") or ""
-        grp = m3u_escape(group_of(ch))
+        grp = m3u_escape(group_of(ch, cid))
         lines.append(
             f'#EXTINF:-1 channel-id="{cid}" tvg-id="{cid}" tvg-chno="{chno}" '
             f'tvg-name="{name}" tvg-logo="{logo}" group-title="{grp}",{name}'
