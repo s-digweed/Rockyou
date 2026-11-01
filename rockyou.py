@@ -381,6 +381,45 @@ def build_epg(merged):
 
 
 # ---------------------------------------------------------------------------
+# Status page (status.json for PlexTV's status.html, Roku tab)
+# ---------------------------------------------------------------------------
+
+def write_status(merged, stats, n_prog):
+    """Every channel (US only), whether it's in Roku's feed right now or being
+    kept through a gap, plus playlist/guide freshness for the Health tab."""
+    try:
+        from status_page import update_status, epg_stats
+    except ImportError:
+        print("status_page.py missing - status page skipped"); return
+    now = now_ts()
+    rows = []
+    for cid, ch in merged.items():
+        missing = ch.get("missing_runs", 0) > 0
+        days = int((now - ch.get("last_seen", now)) / 86400)
+        rows.append({
+            "id": cid, "name": ch.get("name") or cid, "logo": ch.get("logo") or "",
+            "group": group_of(ch, cid),
+            "status": "kept" if missing else "free",
+            "detail": (f"Off Roku's feed {days}d, kept until day {GRACE_DAYS}" if days
+                       else "Off Roku's feed today, kept") if missing else "",
+        })
+    iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    notes = [
+        "No VPN needed: streams play through jmp2.uk",
+        f"{stats['in_feed']:,} channels in Roku's feed this run; "
+        f"{len(stats['retained']):,} kept through gaps (held {GRACE_DAYS} days after they drop)",
+        f"Guide holds {n_prog:,} programmes",
+    ]
+    if stats["dropped"]:
+        notes.append(f"{len(stats['dropped'])} dropped this run after {GRACE_DAYS} days off the feed")
+    health = {"repo": "s-digweed/Rockyou", "every_h": 3,
+              "m3u_updated": iso, "epg_updated": iso, "notes": notes}
+    health.update(epg_stats(EPG_FILE))
+    update_status("Roku (Rockyou)", {"us": {"name": "United States", "channels": rows}},
+                  "status.json", "status_state.json", health=health)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -411,6 +450,10 @@ def run(state_in=None, current_override=None):
 
     n_prog = epg.count("<programme ")
     print(f"Wrote {M3U_FILE} ({len(merged)} channels) and {EPG_FILE} ({n_prog} programmes)")
+    try:
+        write_status(merged, stats, n_prog)
+    except Exception as e:                       # the playlist matters more than the status page
+        print(f"status page skipped: {e}")
     return merged, stats
 
 
